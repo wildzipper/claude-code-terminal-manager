@@ -68,17 +68,22 @@ export class SessionWatcher implements vscode.Disposable {
     const entry = this.jsonlWatchers.get(sessionId);
     if (!entry) { return; }
 
-    this._onSessionActivity.fire(sessionId);
-
     if (entry.idleTimer) { clearTimeout(entry.idleTimer); }
-    entry.idleTimer = setTimeout(() => {
-      const lastType = this.getLastEntryType(jsonlPath);
-      if (lastType === 'assistant') {
-        this._onSessionIdle.fire(sessionId);
-      }
-    }, STATUS_IDLE_MS);
 
     this.checkJsonlAppend(sessionId, jsonlPath, entry);
+
+    const lastType = this.getLastEntryType(jsonlPath);
+    if (lastType === 'assistant') {
+      this._onSessionIdle.fire(sessionId);
+    } else {
+      this._onSessionActivity.fire(sessionId);
+      entry.idleTimer = setTimeout(() => {
+        const currentLastType = this.getLastEntryType(jsonlPath);
+        if (currentLastType === 'assistant') {
+          this._onSessionIdle.fire(sessionId);
+        }
+      }, STATUS_IDLE_MS);
+    }
   }
 
   private checkJsonlAppend(sessionId: string, jsonlPath: string, entry: { offset: number }): void {
@@ -124,17 +129,29 @@ export class SessionWatcher implements vscode.Disposable {
     try {
       const fd = fs.openSync(jsonlPath, 'r');
       const stats = fs.fstatSync(fd);
-      const readSize = Math.min(stats.size, 4096);
+      // Assistant messages can be very large (50KB+). Read enough from the
+      // end to find the last complete JSON line's "type" field.
+      // We don't need to parse the whole line — just find "type":"..." near
+      // the end of the last line.
+      const readSize = Math.min(stats.size, 256 * 1024);
       const buf = Buffer.alloc(readSize);
       fs.readSync(fd, buf, 0, readSize, stats.size - readSize);
       fs.closeSync(fd);
 
-      const lines = buf.toString('utf-8').split('\n').filter(l => l.trim());
+      const text = buf.toString('utf-8');
+      const lines = text.split('\n').filter(l => l.trim());
       for (let i = lines.length - 1; i >= 0; i--) {
-        try {
-          const obj = JSON.parse(lines[i]);
-          if (obj.type) { return obj.type; }
-        } catch { continue; }
+        // The top-level "type" is always near the start of each JSONL line.
+        // Extract it from the first 500 chars to avoid matching nested types
+        // like "type":"text" or "type":"tool_use" inside message content.
+        const head = lines[i].substring(0, 500);
+        const match = head.match(/"type"\s*:\s*"([^"]+)"/);
+        if (match) {
+          const t = match[1];
+          if (['assistant', 'user', 'system', 'custom-title', 'agent-name', 'permission-mode'].includes(t)) {
+            return t;
+          }
+        }
       }
     } catch { /* file locked or missing */ }
     return null;

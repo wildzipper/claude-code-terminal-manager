@@ -191,6 +191,7 @@ export class SessionStorage {
             names.agentName = obj.agentName;
           }
           if (obj.slug && !names.slug) { names.slug = obj.slug; }
+          if (!cwd && obj.cwd) { cwd = obj.cwd; }
           if (obj.type === 'user') {
             messageCount++;
             if (!firstPrompt && obj.message?.content) {
@@ -199,7 +200,6 @@ export class SessionStorage {
               firstPrompt = content.substring(0, 100);
               timestamp = obj.timestamp;
               gitBranch = obj.gitBranch;
-              if (!cwd && obj.cwd) { cwd = obj.cwd; }
             }
           }
           if (obj.type === 'assistant' && obj.message?.usage) {
