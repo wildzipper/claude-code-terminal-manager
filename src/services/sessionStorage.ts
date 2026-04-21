@@ -1,0 +1,185 @@
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
+import * as readline from 'readline';
+import { PreviousSession, SessionsIndex } from '../types';
+import { decodeProjectPath } from '../utils/pathEncoder';
+
+const CLAUDE_DIR = path.join(os.homedir(), '.claude');
+const PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects');
+
+export class SessionStorage {
+  private cache: PreviousSession[] | null = null;
+
+  invalidateCache(): void {
+    this.cache = null;
+  }
+
+  async loadPreviousSessions(): Promise<PreviousSession[]> {
+    if (this.cache) { return this.cache; }
+
+    const sessions: PreviousSession[] = [];
+    let projectDirs: string[];
+    try {
+      projectDirs = fs.readdirSync(PROJECTS_DIR).filter(name => {
+        const fullPath = path.join(PROJECTS_DIR, name);
+        return fs.statSync(fullPath).isDirectory();
+      });
+    } catch {
+      return [];
+    }
+
+    for (const dir of projectDirs) {
+      const dirPath = path.join(PROJECTS_DIR, dir);
+      const projectPath = this.resolveProjectPath(dir, dirPath);
+
+      const indexMetadata = this.loadIndexMetadata(dirPath);
+
+      let jsonlFiles: string[];
+      try {
+        jsonlFiles = fs.readdirSync(dirPath).filter(f => f.endsWith('.jsonl'));
+      } catch { continue; }
+
+      for (const file of jsonlFiles) {
+        const sessionId = path.basename(file, '.jsonl');
+        const jsonlPath = path.join(dirPath, file);
+
+        let stats: fs.Stats;
+        try { stats = fs.statSync(jsonlPath); } catch { continue; }
+
+        const indexEntry = indexMetadata.get(sessionId);
+        const displayName = await this.resolveDisplayName(jsonlPath, indexEntry?.firstPrompt || '');
+        const firstLineMetadata = await this.readFirstMessageMetadata(jsonlPath);
+
+        sessions.push({
+          sessionId,
+          projectPath,
+          displayName,
+          firstPrompt: indexEntry?.firstPrompt || firstLineMetadata.firstPrompt || '',
+          created: indexEntry?.created || firstLineMetadata.timestamp || stats.birthtime.toISOString(),
+          modified: indexEntry?.modified || stats.mtime.toISOString(),
+          messageCount: indexEntry?.messageCount || 0,
+          gitBranch: indexEntry?.gitBranch || firstLineMetadata.gitBranch || '',
+          jsonlPath,
+        });
+      }
+    }
+
+    sessions.sort((a, b) => new Date(b.modified).getTime() - new Date(a.modified).getTime());
+    this.cache = sessions;
+    return sessions;
+  }
+
+  async resolveDisplayName(jsonlPath: string, fallback: string): Promise<string> {
+    try {
+      const names = await this.scanJsonlForNames(jsonlPath);
+      return names.customTitle || names.agentName || names.slug || this.truncate(fallback, 50);
+    } catch {
+      return this.truncate(fallback, 50);
+    }
+  }
+
+  findJsonlForSession(sessionId: string): string | undefined {
+    try {
+      const projectDirs = fs.readdirSync(PROJECTS_DIR);
+      for (const dir of projectDirs) {
+        const jsonlPath = path.join(PROJECTS_DIR, dir, `${sessionId}.jsonl`);
+        try {
+          if (fs.statSync(jsonlPath).isFile()) { return jsonlPath; }
+        } catch { continue; }
+      }
+    } catch { /* projects dir may not exist */ }
+    return undefined;
+  }
+
+  private resolveProjectPath(dirName: string, dirPath: string): string {
+    try {
+      const indexPath = path.join(dirPath, 'sessions-index.json');
+      const raw = fs.readFileSync(indexPath, 'utf-8');
+      const index: SessionsIndex = JSON.parse(raw);
+      if (index.originalPath) { return index.originalPath; }
+    } catch { /* no index */ }
+    return decodeProjectPath(dirName);
+  }
+
+  private loadIndexMetadata(dirPath: string): Map<string, { firstPrompt: string; created: string; modified: string; messageCount: number; gitBranch: string }> {
+    const map = new Map<string, { firstPrompt: string; created: string; modified: string; messageCount: number; gitBranch: string }>();
+    try {
+      const raw = fs.readFileSync(path.join(dirPath, 'sessions-index.json'), 'utf-8');
+      const index: SessionsIndex = JSON.parse(raw);
+      for (const entry of index.entries) {
+        map.set(entry.sessionId, {
+          firstPrompt: entry.firstPrompt,
+          created: entry.created,
+          modified: entry.modified,
+          messageCount: entry.messageCount,
+          gitBranch: entry.gitBranch,
+        });
+      }
+    } catch { /* index doesn't exist for most projects */ }
+    return map;
+  }
+
+  private readFirstMessageMetadata(jsonlPath: string): Promise<{ firstPrompt?: string; timestamp?: string; gitBranch?: string }> {
+    return new Promise((resolve) => {
+      const result: { firstPrompt?: string; timestamp?: string; gitBranch?: string } = {};
+      let stream: fs.ReadStream;
+      try {
+        stream = fs.createReadStream(jsonlPath, { encoding: 'utf-8', start: 0, end: 8192 });
+      } catch { resolve(result); return; }
+
+      const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+      let found = false;
+      rl.on('line', (line) => {
+        if (found) { return; }
+        try {
+          const obj = JSON.parse(line);
+          if (obj.type === 'user' && obj.message?.content) {
+            const content = typeof obj.message.content === 'string'
+              ? obj.message.content
+              : JSON.stringify(obj.message.content);
+            result.firstPrompt = content.substring(0, 100);
+            result.timestamp = obj.timestamp;
+            result.gitBranch = obj.gitBranch;
+            found = true;
+            rl.close();
+            stream.destroy();
+          }
+        } catch { /* skip */ }
+      });
+      rl.on('close', () => resolve(result));
+      rl.on('error', () => resolve(result));
+    });
+  }
+
+  private scanJsonlForNames(jsonlPath: string): Promise<{ customTitle?: string; agentName?: string; slug?: string }> {
+    return new Promise((resolve) => {
+      const result: { customTitle?: string; agentName?: string; slug?: string } = {};
+      let stream: fs.ReadStream;
+      try {
+        stream = fs.createReadStream(jsonlPath, { encoding: 'utf-8' });
+      } catch { resolve(result); return; }
+
+      const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+      rl.on('line', (line) => {
+        try {
+          const obj = JSON.parse(line);
+          if (obj.type === 'custom-title' && obj.customTitle) {
+            result.customTitle = obj.customTitle;
+          } else if (obj.type === 'agent-name' && obj.agentName) {
+            result.agentName = obj.agentName;
+          } else if (obj.slug && !result.slug) {
+            result.slug = obj.slug;
+          }
+        } catch { /* skip malformed lines */ }
+      });
+      rl.on('close', () => resolve(result));
+      rl.on('error', () => resolve(result));
+    });
+  }
+
+  private truncate(str: string, maxLen: number): string {
+    if (!str) { return '(unnamed)'; }
+    return str.length > maxLen ? str.substring(0, maxLen) + '...' : str;
+  }
+}

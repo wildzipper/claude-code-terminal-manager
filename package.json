@@ -1,0 +1,99 @@
+{
+  "name": "claude-code-terminal-manager",
+  "displayName": "Claude Code Terminal Manager",
+  "description": "Manage Claude Code CLI sessions across multiple terminals",
+  "version": "0.1.0",
+  "publisher": "mglie",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wildzipper/claude-code-terminal-manager"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "claude-sessions",
+          "title": "Claude Sessions",
+          "icon": "resources/claude-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "claude-sessions": [
+        {
+          "id": "activeSessions",
+          "name": "Active Sessions"
+        },
+        {
+          "id": "previousSessions",
+          "name": "Previous Sessions"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "claudeTerminalManager.focusSession",
+        "title": "Focus Session Terminal",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "claudeTerminalManager.resumeSession",
+        "title": "Resume Previous Session",
+        "icon": "$(debug-start)"
+      },
+      {
+        "command": "claudeTerminalManager.newSession",
+        "title": "New Claude Session",
+        "icon": "$(add)"
+      },
+      {
+        "command": "claudeTerminalManager.refresh",
+        "title": "Refresh Sessions",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "claudeTerminalManager.copySessionId",
+        "title": "Copy Session ID"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "claudeTerminalManager.newSession",
+          "when": "view == activeSessions",
+          "group": "navigation"
+        },
+        {
+          "command": "claudeTerminalManager.refresh",
+          "when": "view == activeSessions || view == previousSessions",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "claudeTerminalManager.copySessionId",
+          "when": "viewItem == activeSession || viewItem == previousSession"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0",
+    "@vscode/vsce": "^2.22.0"
+  }
+}
