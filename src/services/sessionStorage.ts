@@ -2,11 +2,17 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as readline from 'readline';
-import { PreviousSession, SessionsIndex } from '../types';
+import { PreviousSession, SessionsIndex, TokenUsage } from '../types';
 import { decodeProjectPath } from '../utils/pathEncoder';
 
 const CLAUDE_DIR = path.join(os.homedir(), '.claude');
 const PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects');
+
+interface JsonlNames {
+  customTitle?: string;
+  agentName?: string;
+  slug?: string;
+}
 
 export class SessionStorage {
   private cache: PreviousSession[] | null = null;
@@ -32,7 +38,6 @@ export class SessionStorage {
     for (const dir of projectDirs) {
       const dirPath = path.join(PROJECTS_DIR, dir);
       const projectPath = this.resolveProjectPath(dir, dirPath);
-
       const indexMetadata = this.loadIndexMetadata(dirPath);
 
       let jsonlFiles: string[];
@@ -48,19 +53,24 @@ export class SessionStorage {
         try { stats = fs.statSync(jsonlPath); } catch { continue; }
 
         const indexEntry = indexMetadata.get(sessionId);
-        const displayName = await this.resolveDisplayName(jsonlPath, indexEntry?.firstPrompt || '');
-        const firstLineMetadata = await this.readFirstMessageMetadata(jsonlPath);
+        const scanResult = await this.scanJsonlFull(jsonlPath);
+        const displayName = scanResult.names.customTitle
+          || scanResult.names.agentName
+          || scanResult.names.slug
+          || this.truncate(indexEntry?.firstPrompt || scanResult.firstPrompt || '', 50);
+        const firstLineMetadata = scanResult;
 
         sessions.push({
           sessionId,
           projectPath,
           displayName,
-          firstPrompt: indexEntry?.firstPrompt || firstLineMetadata.firstPrompt || '',
-          created: indexEntry?.created || firstLineMetadata.timestamp || stats.birthtime.toISOString(),
+          firstPrompt: indexEntry?.firstPrompt || scanResult.firstPrompt || '',
+          created: indexEntry?.created || scanResult.timestamp || stats.birthtime.toISOString(),
           modified: indexEntry?.modified || stats.mtime.toISOString(),
-          messageCount: indexEntry?.messageCount || 0,
-          gitBranch: indexEntry?.gitBranch || firstLineMetadata.gitBranch || '',
+          messageCount: indexEntry?.messageCount || scanResult.messageCount,
+          gitBranch: indexEntry?.gitBranch || scanResult.gitBranch || '',
           jsonlPath,
+          tokenUsage: scanResult.tokenUsage,
         });
       }
     }
@@ -92,6 +102,32 @@ export class SessionStorage {
     return undefined;
   }
 
+  scanTokenUsage(jsonlPath: string): Promise<TokenUsage> {
+    return new Promise((resolve) => {
+      const usage: TokenUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreateTokens: 0 };
+      let stream: fs.ReadStream;
+      try {
+        stream = fs.createReadStream(jsonlPath, { encoding: 'utf-8' });
+      } catch { resolve(usage); return; }
+
+      const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+      rl.on('line', (line) => {
+        try {
+          const obj = JSON.parse(line);
+          if (obj.type === 'assistant' && obj.message?.usage) {
+            const u = obj.message.usage;
+            usage.inputTokens += (u.input_tokens || 0) + (u.cache_read_input_tokens || 0);
+            usage.outputTokens += u.output_tokens || 0;
+            usage.cacheReadTokens += u.cache_read_input_tokens || 0;
+            usage.cacheCreateTokens += u.cache_creation_input_tokens || 0;
+          }
+        } catch { /* skip */ }
+      });
+      rl.on('close', () => resolve(usage));
+      rl.on('error', () => resolve(usage));
+    });
+  }
+
   private resolveProjectPath(dirName: string, dirPath: string): string {
     try {
       const indexPath = path.join(dirPath, 'sessions-index.json');
@@ -120,41 +156,64 @@ export class SessionStorage {
     return map;
   }
 
-  private readFirstMessageMetadata(jsonlPath: string): Promise<{ firstPrompt?: string; timestamp?: string; gitBranch?: string }> {
+  private scanJsonlFull(jsonlPath: string): Promise<{
+    names: JsonlNames;
+    tokenUsage: TokenUsage;
+    firstPrompt?: string;
+    timestamp?: string;
+    gitBranch?: string;
+    messageCount: number;
+  }> {
     return new Promise((resolve) => {
-      const result: { firstPrompt?: string; timestamp?: string; gitBranch?: string } = {};
+      const names: JsonlNames = {};
+      const tokenUsage: TokenUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreateTokens: 0 };
+      let firstPrompt: string | undefined;
+      let timestamp: string | undefined;
+      let gitBranch: string | undefined;
+      let messageCount = 0;
+
       let stream: fs.ReadStream;
       try {
-        stream = fs.createReadStream(jsonlPath, { encoding: 'utf-8', start: 0, end: 8192 });
-      } catch { resolve(result); return; }
+        stream = fs.createReadStream(jsonlPath, { encoding: 'utf-8' });
+      } catch { resolve({ names, tokenUsage, messageCount: 0 }); return; }
 
       const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
-      let found = false;
       rl.on('line', (line) => {
-        if (found) { return; }
         try {
           const obj = JSON.parse(line);
-          if (obj.type === 'user' && obj.message?.content) {
-            const content = typeof obj.message.content === 'string'
-              ? obj.message.content
-              : JSON.stringify(obj.message.content);
-            result.firstPrompt = content.substring(0, 100);
-            result.timestamp = obj.timestamp;
-            result.gitBranch = obj.gitBranch;
-            found = true;
-            rl.close();
-            stream.destroy();
+          if (obj.type === 'custom-title' && obj.customTitle) {
+            names.customTitle = obj.customTitle;
+          } else if (obj.type === 'agent-name' && obj.agentName) {
+            names.agentName = obj.agentName;
+          }
+          if (obj.slug && !names.slug) { names.slug = obj.slug; }
+          if (obj.type === 'user') {
+            messageCount++;
+            if (!firstPrompt && obj.message?.content) {
+              const content = typeof obj.message.content === 'string'
+                ? obj.message.content : JSON.stringify(obj.message.content);
+              firstPrompt = content.substring(0, 100);
+              timestamp = obj.timestamp;
+              gitBranch = obj.gitBranch;
+            }
+          }
+          if (obj.type === 'assistant' && obj.message?.usage) {
+            const u = obj.message.usage;
+            tokenUsage.inputTokens += (u.input_tokens || 0) + (u.cache_read_input_tokens || 0);
+            tokenUsage.outputTokens += u.output_tokens || 0;
+            tokenUsage.cacheReadTokens += u.cache_read_input_tokens || 0;
+            tokenUsage.cacheCreateTokens += u.cache_creation_input_tokens || 0;
           }
         } catch { /* skip */ }
       });
-      rl.on('close', () => resolve(result));
-      rl.on('error', () => resolve(result));
+      rl.on('close', () => resolve({ names, tokenUsage, firstPrompt, timestamp, gitBranch, messageCount }));
+      rl.on('error', () => resolve({ names, tokenUsage, messageCount: 0 }));
     });
   }
 
-  private scanJsonlForNames(jsonlPath: string): Promise<{ customTitle?: string; agentName?: string; slug?: string }> {
+  private scanJsonlForNames(jsonlPath: string): Promise<JsonlNames> {
     return new Promise((resolve) => {
-      const result: { customTitle?: string; agentName?: string; slug?: string } = {};
+      const result: JsonlNames = {};
       let stream: fs.ReadStream;
       try {
         stream = fs.createReadStream(jsonlPath, { encoding: 'utf-8' });

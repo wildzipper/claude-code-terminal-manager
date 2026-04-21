@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { PreviousSession } from '../types';
 import { SessionStorage } from '../services/sessionStorage';
+import { formatTokenCount } from '../utils/format';
 
 class ProjectGroupItem extends vscode.TreeItem {
   constructor(
@@ -20,6 +21,9 @@ class PreviousSessionTreeItem extends vscode.TreeItem {
   constructor(public readonly session: PreviousSession) {
     super(session.displayName, vscode.TreeItemCollapsibleState.None);
     this.description = formatRelativeDate(session.modified);
+
+    const tu = session.tokenUsage;
+    const totalTokens = tu.inputTokens + tu.outputTokens;
     this.tooltip = new vscode.MarkdownString(
       `**${session.displayName}**\n\n` +
       `- First prompt: ${session.firstPrompt || '(none)'}\n` +
@@ -27,7 +31,14 @@ class PreviousSessionTreeItem extends vscode.TreeItem {
       `- Branch: ${session.gitBranch || '(none)'}\n` +
       `- Created: ${new Date(session.created).toLocaleDateString()}\n` +
       `- Modified: ${new Date(session.modified).toLocaleDateString()}\n` +
-      `- Session: \`${session.sessionId}\``
+      `- Session: \`${session.sessionId}\`\n\n` +
+      (totalTokens > 0 ? (
+        `**Token Usage**\n` +
+        `- Input: ${formatTokenCount(tu.inputTokens)}\n` +
+        `- Output: ${formatTokenCount(tu.outputTokens)}\n` +
+        `- Cache read: ${formatTokenCount(tu.cacheReadTokens)}\n` +
+        `- Cache create: ${formatTokenCount(tu.cacheCreateTokens)}`
+      ) : '')
     );
     this.iconPath = new vscode.ThemeIcon('history');
     this.contextValue = 'previousSession';

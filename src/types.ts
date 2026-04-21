@@ -1,5 +1,12 @@
 import * as vscode from 'vscode';
 
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreateTokens: number;
+}
+
 export interface ActiveSession {
   sessionId: string;
   terminal: vscode.Terminal;
@@ -10,6 +17,7 @@ export interface ActiveSession {
   startedAt: number;
   version: string;
   jsonlPath?: string;
+  tokenUsage: TokenUsage;
 }
 
 export interface PreviousSession {
@@ -22,6 +30,7 @@ export interface PreviousSession {
   messageCount: number;
   gitBranch: string;
   jsonlPath: string;
+  tokenUsage: TokenUsage;
 }
 
 export interface SessionPidFile {

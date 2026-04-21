@@ -3,8 +3,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as cp from 'child_process';
-import { ActiveSession, SessionPidFile } from '../types';
-import { SessionWatcher } from './sessionWatcher';
+import { ActiveSession, SessionPidFile, TokenUsage } from '../types';
+import { SessionWatcher, TokenUpdateEvent } from './sessionWatcher';
 import { SessionStorage } from './sessionStorage';
 
 const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
@@ -35,6 +35,7 @@ export class TerminalTracker implements vscode.Disposable {
       this.sessionWatcher.onSessionRenamed(e => this.handleSessionRenamed(e)),
       this.sessionWatcher.onSessionActivity(id => this.updateStatus(id, 'working')),
       this.sessionWatcher.onSessionIdle(id => this.updateStatus(id, 'ready')),
+      this.sessionWatcher.onSessionTokenUpdate(e => this.handleTokenUpdate(e)),
     );
 
     setTimeout(() => this.matchExistingSessions(), 1000);
@@ -80,8 +81,10 @@ export class TerminalTracker implements vscode.Disposable {
     const jsonlPath = this.findJsonlPath(pidFile);
     const displayName = await this.resolveSessionName(pidFile, jsonlPath);
 
+    let tokenUsage: TokenUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreateTokens: 0 };
     if (jsonlPath) {
       this.sessionWatcher.watchJsonlFile(pidFile.sessionId, jsonlPath);
+      tokenUsage = await this.sessionStorage.scanTokenUsage(jsonlPath);
     }
 
     this.sessions.set(pidFile.sessionId, {
@@ -94,6 +97,7 @@ export class TerminalTracker implements vscode.Disposable {
       startedAt: pidFile.startedAt,
       version: pidFile.version,
       jsonlPath,
+      tokenUsage,
     });
     this._onSessionsChanged.fire();
   }
@@ -125,6 +129,17 @@ export class TerminalTracker implements vscode.Disposable {
     const session = this.sessions.get(event.sessionId);
     if (session) {
       session.displayName = event.newName;
+      this._onSessionsChanged.fire();
+    }
+  }
+
+  private handleTokenUpdate(event: TokenUpdateEvent): void {
+    const session = this.sessions.get(event.sessionId);
+    if (session) {
+      session.tokenUsage.inputTokens += event.delta.inputTokens;
+      session.tokenUsage.outputTokens += event.delta.outputTokens;
+      session.tokenUsage.cacheReadTokens += event.delta.cacheReadTokens;
+      session.tokenUsage.cacheCreateTokens += event.delta.cacheCreateTokens;
       this._onSessionsChanged.fire();
     }
   }
@@ -179,9 +194,12 @@ export class TerminalTracker implements vscode.Disposable {
   }
 
   private async resolveSessionName(pidFile: SessionPidFile, jsonlPath?: string): Promise<string> {
+    // Coalesce: customTitle > agentName > pidFile.name > slug > firstPrompt > UUID
     if (jsonlPath) {
-      const name = await this.sessionStorage.resolveDisplayName(jsonlPath, '');
-      if (name && name !== '(unnamed)') { return name; }
+      try {
+        const name = await this.sessionStorage.resolveDisplayName(jsonlPath, '');
+        if (name && name !== '(unnamed)') { return name; }
+      } catch { /* fall through */ }
     }
     if (pidFile.name) { return pidFile.name; }
     return pidFile.sessionId.substring(0, 8);

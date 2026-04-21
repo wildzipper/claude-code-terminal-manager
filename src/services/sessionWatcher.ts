@@ -2,10 +2,15 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as vscode from 'vscode';
-import { SessionPidFile } from '../types';
+import { SessionPidFile, TokenUsage } from '../types';
 
 const SESSIONS_DIR = path.join(os.homedir(), '.claude', 'sessions');
 const STATUS_IDLE_MS = 5_000;
+
+export interface TokenUpdateEvent {
+  sessionId: string;
+  delta: TokenUsage;
+}
 
 export class SessionWatcher implements vscode.Disposable {
   private readonly _onSessionStarted = new vscode.EventEmitter<SessionPidFile>();
@@ -13,12 +18,14 @@ export class SessionWatcher implements vscode.Disposable {
   private readonly _onSessionRenamed = new vscode.EventEmitter<{ sessionId: string; newName: string }>();
   private readonly _onSessionActivity = new vscode.EventEmitter<string>();
   private readonly _onSessionIdle = new vscode.EventEmitter<string>();
+  private readonly _onSessionTokenUpdate = new vscode.EventEmitter<TokenUpdateEvent>();
 
   readonly onSessionStarted = this._onSessionStarted.event;
   readonly onSessionEnded = this._onSessionEnded.event;
   readonly onSessionRenamed = this._onSessionRenamed.event;
   readonly onSessionActivity = this._onSessionActivity.event;
   readonly onSessionIdle = this._onSessionIdle.event;
+  readonly onSessionTokenUpdate = this._onSessionTokenUpdate.event;
 
   private dirWatcher: fs.FSWatcher | null = null;
   private jsonlWatchers = new Map<string, { watcher: fs.FSWatcher; offset: number; idleTimer: ReturnType<typeof setTimeout> | null }>();
@@ -92,6 +99,19 @@ export class SessionWatcher implements vscode.Disposable {
           } else if (obj.type === 'agent-name' && obj.agentName) {
             this._onSessionRenamed.fire({ sessionId, newName: obj.agentName });
           }
+
+          if (obj.type === 'assistant' && obj.message?.usage) {
+            const u = obj.message.usage;
+            this._onSessionTokenUpdate.fire({
+              sessionId,
+              delta: {
+                inputTokens: (u.input_tokens || 0) + (u.cache_read_input_tokens || 0),
+                outputTokens: u.output_tokens || 0,
+                cacheReadTokens: u.cache_read_input_tokens || 0,
+                cacheCreateTokens: u.cache_creation_input_tokens || 0,
+              },
+            });
+          }
         } catch { /* skip malformed */ }
       }
     } catch { /* file may be locked */ }
@@ -159,5 +179,6 @@ export class SessionWatcher implements vscode.Disposable {
     this._onSessionRenamed.dispose();
     this._onSessionActivity.dispose();
     this._onSessionIdle.dispose();
+    this._onSessionTokenUpdate.dispose();
   }
 }

@@ -2,24 +2,30 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { ActiveSession } from '../types';
 import { TerminalTracker } from '../services/terminalTracker';
+import { formatTokenCount } from '../utils/format';
 
 export class ActiveSessionTreeItem extends vscode.TreeItem {
   constructor(public readonly session: ActiveSession) {
     super(session.displayName, vscode.TreeItemCollapsibleState.None);
 
-    const statusIcon = session.status === 'ready' ? '$(circle-filled)'
-      : session.status === 'working' ? '$(loading~spin)'
-      : '$(circle-outline)';
-
     const folder = path.basename(session.cwd);
-    this.description = `${folder}`;
+    const totalTokens = session.tokenUsage.inputTokens + session.tokenUsage.outputTokens;
+    const tokenStr = totalTokens > 0 ? ` · ${formatTokenCount(totalTokens)}` : '';
+    this.description = `${folder}${tokenStr}`;
+
+    const tu = session.tokenUsage;
     this.tooltip = new vscode.MarkdownString(
       `**${session.displayName}**\n\n` +
       `- Status: ${session.status}\n` +
       `- Folder: ${session.cwd}\n` +
       `- Session: \`${session.sessionId}\`\n` +
       `- PID: ${session.pid}\n` +
-      `- Version: ${session.version}`
+      `- Version: ${session.version}\n\n` +
+      `**Token Usage**\n` +
+      `- Input: ${formatTokenCount(tu.inputTokens)}\n` +
+      `- Output: ${formatTokenCount(tu.outputTokens)}\n` +
+      `- Cache read: ${formatTokenCount(tu.cacheReadTokens)}\n` +
+      `- Cache create: ${formatTokenCount(tu.cacheCreateTokens)}`
     );
     this.iconPath = session.status === 'ready'
       ? new vscode.ThemeIcon('circle-filled', new vscode.ThemeColor('testing.iconPassed'))
