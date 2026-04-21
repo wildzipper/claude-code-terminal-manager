@@ -72,7 +72,10 @@ export class SessionWatcher implements vscode.Disposable {
 
     if (entry.idleTimer) { clearTimeout(entry.idleTimer); }
     entry.idleTimer = setTimeout(() => {
-      this._onSessionIdle.fire(sessionId);
+      const lastType = this.getLastEntryType(jsonlPath);
+      if (lastType === 'assistant') {
+        this._onSessionIdle.fire(sessionId);
+      }
     }, STATUS_IDLE_MS);
 
     this.checkJsonlAppend(sessionId, jsonlPath, entry);
@@ -115,6 +118,26 @@ export class SessionWatcher implements vscode.Disposable {
         } catch { /* skip malformed */ }
       }
     } catch { /* file may be locked */ }
+  }
+
+  private getLastEntryType(jsonlPath: string): string | null {
+    try {
+      const fd = fs.openSync(jsonlPath, 'r');
+      const stats = fs.fstatSync(fd);
+      const readSize = Math.min(stats.size, 4096);
+      const buf = Buffer.alloc(readSize);
+      fs.readSync(fd, buf, 0, readSize, stats.size - readSize);
+      fs.closeSync(fd);
+
+      const lines = buf.toString('utf-8').split('\n').filter(l => l.trim());
+      for (let i = lines.length - 1; i >= 0; i--) {
+        try {
+          const obj = JSON.parse(lines[i]);
+          if (obj.type) { return obj.type; }
+        } catch { continue; }
+      }
+    } catch { /* file locked or missing */ }
+    return null;
   }
 
   private debouncedScan(): void {
