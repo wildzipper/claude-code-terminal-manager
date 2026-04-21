@@ -104,7 +104,7 @@ export class SessionStorage {
 
   scanTokenUsage(jsonlPath: string): Promise<TokenUsage> {
     return new Promise((resolve) => {
-      const usage: TokenUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreateTokens: 0 };
+      const usage: TokenUsage = { contextTokens: 0, cumulativeOutput: 0, cacheReadTokens: 0, cacheCreateTokens: 0 };
       let stream: fs.ReadStream;
       try {
         stream = fs.createReadStream(jsonlPath, { encoding: 'utf-8' });
@@ -116,10 +116,10 @@ export class SessionStorage {
           const obj = JSON.parse(line);
           if (obj.type === 'assistant' && obj.message?.usage) {
             const u = obj.message.usage;
-            usage.inputTokens += (u.input_tokens || 0) + (u.cache_read_input_tokens || 0);
-            usage.outputTokens += u.output_tokens || 0;
-            usage.cacheReadTokens += u.cache_read_input_tokens || 0;
-            usage.cacheCreateTokens += u.cache_creation_input_tokens || 0;
+            usage.contextTokens = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+            usage.cumulativeOutput += u.output_tokens || 0;
+            usage.cacheReadTokens = u.cache_read_input_tokens || 0;
+            usage.cacheCreateTokens = u.cache_creation_input_tokens || 0;
           }
         } catch { /* skip */ }
       });
@@ -166,7 +166,7 @@ export class SessionStorage {
   }> {
     return new Promise((resolve) => {
       const names: JsonlNames = {};
-      const tokenUsage: TokenUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreateTokens: 0 };
+      const tokenUsage: TokenUsage = { contextTokens: 0, cumulativeOutput: 0, cacheReadTokens: 0, cacheCreateTokens: 0 };
       let firstPrompt: string | undefined;
       let timestamp: string | undefined;
       let gitBranch: string | undefined;
@@ -199,10 +199,10 @@ export class SessionStorage {
           }
           if (obj.type === 'assistant' && obj.message?.usage) {
             const u = obj.message.usage;
-            tokenUsage.inputTokens += (u.input_tokens || 0) + (u.cache_read_input_tokens || 0);
-            tokenUsage.outputTokens += u.output_tokens || 0;
-            tokenUsage.cacheReadTokens += u.cache_read_input_tokens || 0;
-            tokenUsage.cacheCreateTokens += u.cache_creation_input_tokens || 0;
+            tokenUsage.contextTokens = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+            tokenUsage.cumulativeOutput += u.output_tokens || 0;
+            tokenUsage.cacheReadTokens = u.cache_read_input_tokens || 0;
+            tokenUsage.cacheCreateTokens = u.cache_creation_input_tokens || 0;
           }
         } catch { /* skip */ }
       });

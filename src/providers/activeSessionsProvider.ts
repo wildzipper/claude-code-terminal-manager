@@ -4,14 +4,17 @@ import { ActiveSession } from '../types';
 import { TerminalTracker } from '../services/terminalTracker';
 import { formatTokenCount } from '../utils/format';
 
+const CONTEXT_LIMIT = 200_000;
+
 export class ActiveSessionTreeItem extends vscode.TreeItem {
   constructor(public readonly session: ActiveSession) {
     super(session.displayName, vscode.TreeItemCollapsibleState.None);
 
     const folder = path.basename(session.cwd);
-    const totalTokens = session.tokenUsage.inputTokens + session.tokenUsage.outputTokens;
-    const tokenStr = totalTokens > 0 ? ` · ${formatTokenCount(totalTokens)}` : '';
-    this.description = `${folder}${tokenStr}`;
+    const ctx = session.tokenUsage.contextTokens;
+    const pct = Math.round((ctx / CONTEXT_LIMIT) * 100);
+    const contextStr = ctx > 0 ? ` · ${formatTokenCount(ctx)} (${pct}%)` : '';
+    this.description = `${folder}${contextStr}`;
 
     const tu = session.tokenUsage;
     this.tooltip = new vscode.MarkdownString(
@@ -21,11 +24,11 @@ export class ActiveSessionTreeItem extends vscode.TreeItem {
       `- Session: \`${session.sessionId}\`\n` +
       `- PID: ${session.pid}\n` +
       `- Version: ${session.version}\n\n` +
-      `**Token Usage**\n` +
-      `- Input: ${formatTokenCount(tu.inputTokens)}\n` +
-      `- Output: ${formatTokenCount(tu.outputTokens)}\n` +
+      `**Context Window**\n` +
+      `- Current: ${formatTokenCount(tu.contextTokens)} / 200k (${pct}%)\n` +
       `- Cache read: ${formatTokenCount(tu.cacheReadTokens)}\n` +
-      `- Cache create: ${formatTokenCount(tu.cacheCreateTokens)}`
+      `- Cache create: ${formatTokenCount(tu.cacheCreateTokens)}\n` +
+      `- Total output: ${formatTokenCount(tu.cumulativeOutput)}`
     );
     this.iconPath = session.status === 'ready'
       ? new vscode.ThemeIcon('circle-filled', new vscode.ThemeColor('testing.iconPassed'))

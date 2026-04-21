@@ -81,7 +81,7 @@ export class TerminalTracker implements vscode.Disposable {
     const jsonlPath = this.findJsonlPath(pidFile);
     const displayName = await this.resolveSessionName(pidFile, jsonlPath);
 
-    let tokenUsage: TokenUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreateTokens: 0 };
+    let tokenUsage: TokenUsage = { contextTokens: 0, cumulativeOutput: 0, cacheReadTokens: 0, cacheCreateTokens: 0 };
     if (jsonlPath) {
       this.sessionWatcher.watchJsonlFile(pidFile.sessionId, jsonlPath);
       tokenUsage = await this.sessionStorage.scanTokenUsage(jsonlPath);
@@ -136,10 +136,10 @@ export class TerminalTracker implements vscode.Disposable {
   private handleTokenUpdate(event: TokenUpdateEvent): void {
     const session = this.sessions.get(event.sessionId);
     if (session) {
-      session.tokenUsage.inputTokens += event.delta.inputTokens;
-      session.tokenUsage.outputTokens += event.delta.outputTokens;
-      session.tokenUsage.cacheReadTokens += event.delta.cacheReadTokens;
-      session.tokenUsage.cacheCreateTokens += event.delta.cacheCreateTokens;
+      session.tokenUsage.contextTokens = event.latest.contextTokens;
+      session.tokenUsage.cumulativeOutput += event.latest.cumulativeOutput;
+      session.tokenUsage.cacheReadTokens = event.latest.cacheReadTokens;
+      session.tokenUsage.cacheCreateTokens = event.latest.cacheCreateTokens;
       this._onSessionsChanged.fire();
     }
   }

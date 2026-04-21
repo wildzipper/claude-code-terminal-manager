@@ -9,7 +9,7 @@ const STATUS_IDLE_MS = 5_000;
 
 export interface TokenUpdateEvent {
   sessionId: string;
-  delta: TokenUsage;
+  latest: TokenUsage;
 }
 
 export class SessionWatcher implements vscode.Disposable {
@@ -104,9 +104,9 @@ export class SessionWatcher implements vscode.Disposable {
             const u = obj.message.usage;
             this._onSessionTokenUpdate.fire({
               sessionId,
-              delta: {
-                inputTokens: (u.input_tokens || 0) + (u.cache_read_input_tokens || 0),
-                outputTokens: u.output_tokens || 0,
+              latest: {
+                contextTokens: (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0),
+                cumulativeOutput: u.output_tokens || 0,
                 cacheReadTokens: u.cache_read_input_tokens || 0,
                 cacheCreateTokens: u.cache_creation_input_tokens || 0,
               },

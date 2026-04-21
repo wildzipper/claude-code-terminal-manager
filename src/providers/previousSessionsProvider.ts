@@ -23,7 +23,6 @@ class PreviousSessionTreeItem extends vscode.TreeItem {
     this.description = formatRelativeDate(session.modified);
 
     const tu = session.tokenUsage;
-    const totalTokens = tu.inputTokens + tu.outputTokens;
     this.tooltip = new vscode.MarkdownString(
       `**${session.displayName}**\n\n` +
       `- First prompt: ${session.firstPrompt || '(none)'}\n` +
@@ -32,10 +31,10 @@ class PreviousSessionTreeItem extends vscode.TreeItem {
       `- Created: ${new Date(session.created).toLocaleDateString()}\n` +
       `- Modified: ${new Date(session.modified).toLocaleDateString()}\n` +
       `- Session: \`${session.sessionId}\`\n\n` +
-      (totalTokens > 0 ? (
-        `**Token Usage**\n` +
-        `- Input: ${formatTokenCount(tu.inputTokens)}\n` +
-        `- Output: ${formatTokenCount(tu.outputTokens)}\n` +
+      (tu.contextTokens > 0 ? (
+        `**Last Context**\n` +
+        `- Context window: ${formatTokenCount(tu.contextTokens)}\n` +
+        `- Total output: ${formatTokenCount(tu.cumulativeOutput)}\n` +
         `- Cache read: ${formatTokenCount(tu.cacheReadTokens)}\n` +
         `- Cache create: ${formatTokenCount(tu.cacheCreateTokens)}`
       ) : '')

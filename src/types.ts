@@ -1,8 +1,8 @@
 import * as vscode from 'vscode';
 
 export interface TokenUsage {
-  inputTokens: number;
-  outputTokens: number;
+  contextTokens: number;
+  cumulativeOutput: number;
   cacheReadTokens: number;
   cacheCreateTokens: number;
 }
