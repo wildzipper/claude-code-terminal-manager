@@ -60,9 +60,11 @@ export class SessionStorage {
           || this.truncate(indexEntry?.firstPrompt || scanResult.firstPrompt || '', 50);
         const firstLineMetadata = scanResult;
 
+        const resolvedPath = scanResult.cwd || projectPath;
+
         sessions.push({
           sessionId,
-          projectPath,
+          projectPath: resolvedPath,
           displayName,
           firstPrompt: indexEntry?.firstPrompt || scanResult.firstPrompt || '',
           created: indexEntry?.created || scanResult.timestamp || stats.birthtime.toISOString(),
@@ -162,6 +164,7 @@ export class SessionStorage {
     firstPrompt?: string;
     timestamp?: string;
     gitBranch?: string;
+    cwd?: string;
     messageCount: number;
   }> {
     return new Promise((resolve) => {
@@ -170,6 +173,7 @@ export class SessionStorage {
       let firstPrompt: string | undefined;
       let timestamp: string | undefined;
       let gitBranch: string | undefined;
+      let cwd: string | undefined;
       let messageCount = 0;
 
       let stream: fs.ReadStream;
@@ -195,6 +199,7 @@ export class SessionStorage {
               firstPrompt = content.substring(0, 100);
               timestamp = obj.timestamp;
               gitBranch = obj.gitBranch;
+              if (!cwd && obj.cwd) { cwd = obj.cwd; }
             }
           }
           if (obj.type === 'assistant' && obj.message?.usage) {
@@ -206,7 +211,7 @@ export class SessionStorage {
           }
         } catch { /* skip */ }
       });
-      rl.on('close', () => resolve({ names, tokenUsage, firstPrompt, timestamp, gitBranch, messageCount }));
+      rl.on('close', () => resolve({ names, tokenUsage, firstPrompt, timestamp, gitBranch, cwd, messageCount }));
       rl.on('error', () => resolve({ names, tokenUsage, messageCount: 0 }));
     });
   }
