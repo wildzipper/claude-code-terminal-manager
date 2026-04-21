@@ -100,6 +100,11 @@ export class TerminalTracker implements vscode.Disposable {
       tokenUsage,
     });
     this._onSessionsChanged.fire();
+
+    // If name is still UUID-like, retry after JSONL has time to populate
+    if (displayName === pidFile.sessionId.substring(0, 8)) {
+      setTimeout(() => this.refreshSessionName(pidFile.sessionId), 3000);
+    }
   }
 
   private handleSessionEnded(pid: number): void {
@@ -194,15 +199,34 @@ export class TerminalTracker implements vscode.Disposable {
   }
 
   private async resolveSessionName(pidFile: SessionPidFile, jsonlPath?: string): Promise<string> {
-    // Coalesce: customTitle > agentName > pidFile.name > slug > firstPrompt > UUID
+    // Coalesce: customTitle > agentName > slug > pidFile.name > UUID
     if (jsonlPath) {
       try {
         const name = await this.sessionStorage.resolveDisplayName(jsonlPath, '');
         if (name && name !== '(unnamed)') { return name; }
       } catch { /* fall through */ }
     }
+    // PID file name is always available instantly — reliable fallback
     if (pidFile.name) { return pidFile.name; }
     return pidFile.sessionId.substring(0, 8);
+  }
+
+  refreshSessionName(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) { return; }
+    const jsonlPath = session.jsonlPath || this.sessionStorage.findJsonlForSession(sessionId);
+    if (jsonlPath && !session.jsonlPath) {
+      session.jsonlPath = jsonlPath;
+      this.sessionWatcher.watchJsonlFile(sessionId, jsonlPath);
+    }
+    if (jsonlPath) {
+      this.sessionStorage.resolveDisplayName(jsonlPath, '').then(name => {
+        if (name && name !== '(unnamed)' && name !== session.displayName) {
+          session.displayName = name;
+          this._onSessionsChanged.fire();
+        }
+      });
+    }
   }
 
   private findJsonlPath(pidFile: SessionPidFile): string | undefined {

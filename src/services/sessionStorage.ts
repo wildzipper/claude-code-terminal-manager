@@ -6,6 +6,13 @@ import { PreviousSession, SessionsIndex, TokenUsage } from '../types';
 import { decodeProjectPath } from '../utils/pathEncoder';
 
 const CLAUDE_DIR = path.join(os.homedir(), '.claude');
+
+function normalizeDriveLetter(p: string): string {
+  if (p.length >= 2 && p[1] === ':') {
+    return p[0].toUpperCase() + p.substring(1);
+  }
+  return p;
+}
 const PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects');
 
 interface JsonlNames {
@@ -60,7 +67,7 @@ export class SessionStorage {
           || this.truncate(indexEntry?.firstPrompt || scanResult.firstPrompt || '', 50);
         const firstLineMetadata = scanResult;
 
-        const resolvedPath = scanResult.cwd || projectPath;
+        const resolvedPath = normalizeDriveLetter(scanResult.cwd || projectPath);
 
         sessions.push({
           sessionId,
