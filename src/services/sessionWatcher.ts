@@ -30,7 +30,7 @@ export class SessionWatcher implements vscode.Disposable {
   readonly onSessionTokenUpdate = this._onSessionTokenUpdate.event;
 
   private dirWatcher: fs.FSWatcher | null = null;
-  private jsonlWatchers = new Map<string, { watcher: fs.FSWatcher; offset: number; debounceTimer: ReturnType<typeof setTimeout> | null }>();
+  private jsonlWatchers = new Map<string, { watcher: fs.FSWatcher; offset: number; debounceTimer: ReturnType<typeof setTimeout> | null; recheckTimer: ReturnType<typeof setTimeout> | null }>();
   private knownPids = new Set<number>();
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -53,7 +53,7 @@ export class SessionWatcher implements vscode.Disposable {
       const watcher = fs.watch(jsonlPath, () => {
         this.debouncedJsonlChange(sessionId, jsonlPath);
       });
-      this.jsonlWatchers.set(sessionId, { watcher, offset, debounceTimer: null });
+      this.jsonlWatchers.set(sessionId, { watcher, offset, debounceTimer: null, recheckTimer: null });
     } catch { /* file may not exist yet */ }
   }
 
@@ -62,6 +62,7 @@ export class SessionWatcher implements vscode.Disposable {
     if (entry) {
       entry.watcher.close();
       if (entry.debounceTimer) { clearTimeout(entry.debounceTimer); }
+      if (entry.recheckTimer) { clearTimeout(entry.recheckTimer); }
       this.jsonlWatchers.delete(sessionId);
     }
   }
@@ -79,11 +80,22 @@ export class SessionWatcher implements vscode.Disposable {
     const entry = this.jsonlWatchers.get(sessionId);
     if (!entry) { return; }
 
+    if (entry.recheckTimer) { clearTimeout(entry.recheckTimer); }
+
     this.processNewLines(sessionId, jsonlPath, entry);
 
     const status = this.inferStatusFromTail(jsonlPath);
     if (status) {
       this._onSessionStatusChanged.fire({ sessionId, status });
+
+      if (status.category === 'active') {
+        entry.recheckTimer = setTimeout(() => {
+          const updated = this.inferStatusFromTail(jsonlPath);
+          if (updated) {
+            this._onSessionStatusChanged.fire({ sessionId, status: updated });
+          }
+        }, 3000);
+      }
     }
   }
 
@@ -220,6 +232,7 @@ export class SessionWatcher implements vscode.Disposable {
     for (const [, entry] of this.jsonlWatchers) {
       entry.watcher.close();
       if (entry.debounceTimer) { clearTimeout(entry.debounceTimer); }
+      if (entry.recheckTimer) { clearTimeout(entry.recheckTimer); }
     }
     this.jsonlWatchers.clear();
     this._onSessionStarted.dispose();
