@@ -2,33 +2,35 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as vscode from 'vscode';
-import { SessionPidFile, TokenUsage } from '../types';
+import { SessionPidFile, SessionStatus, sessionStatus, TokenUsage } from '../types';
 
 const SESSIONS_DIR = path.join(os.homedir(), '.claude', 'sessions');
-const STATUS_IDLE_MS = 5_000;
 
 export interface TokenUpdateEvent {
   sessionId: string;
   latest: TokenUsage;
 }
 
+export interface StatusChangeEvent {
+  sessionId: string;
+  status: SessionStatus;
+}
+
 export class SessionWatcher implements vscode.Disposable {
   private readonly _onSessionStarted = new vscode.EventEmitter<SessionPidFile>();
   private readonly _onSessionEnded = new vscode.EventEmitter<number>();
   private readonly _onSessionRenamed = new vscode.EventEmitter<{ sessionId: string; newName: string }>();
-  private readonly _onSessionActivity = new vscode.EventEmitter<string>();
-  private readonly _onSessionIdle = new vscode.EventEmitter<string>();
+  private readonly _onSessionStatusChanged = new vscode.EventEmitter<StatusChangeEvent>();
   private readonly _onSessionTokenUpdate = new vscode.EventEmitter<TokenUpdateEvent>();
 
   readonly onSessionStarted = this._onSessionStarted.event;
   readonly onSessionEnded = this._onSessionEnded.event;
   readonly onSessionRenamed = this._onSessionRenamed.event;
-  readonly onSessionActivity = this._onSessionActivity.event;
-  readonly onSessionIdle = this._onSessionIdle.event;
+  readonly onSessionStatusChanged = this._onSessionStatusChanged.event;
   readonly onSessionTokenUpdate = this._onSessionTokenUpdate.event;
 
   private dirWatcher: fs.FSWatcher | null = null;
-  private jsonlWatchers = new Map<string, { watcher: fs.FSWatcher; offset: number; idleTimer: ReturnType<typeof setTimeout> | null }>();
+  private jsonlWatchers = new Map<string, { watcher: fs.FSWatcher; offset: number; debounceTimer: ReturnType<typeof setTimeout> | null }>();
   private knownPids = new Set<number>();
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -49,9 +51,9 @@ export class SessionWatcher implements vscode.Disposable {
       const stats = fs.statSync(jsonlPath);
       const offset = stats.size;
       const watcher = fs.watch(jsonlPath, () => {
-        this.handleJsonlChange(sessionId, jsonlPath);
+        this.debouncedJsonlChange(sessionId, jsonlPath);
       });
-      this.jsonlWatchers.set(sessionId, { watcher, offset, idleTimer: null });
+      this.jsonlWatchers.set(sessionId, { watcher, offset, debounceTimer: null });
     } catch { /* file may not exist yet */ }
   }
 
@@ -59,34 +61,33 @@ export class SessionWatcher implements vscode.Disposable {
     const entry = this.jsonlWatchers.get(sessionId);
     if (entry) {
       entry.watcher.close();
-      if (entry.idleTimer) { clearTimeout(entry.idleTimer); }
+      if (entry.debounceTimer) { clearTimeout(entry.debounceTimer); }
       this.jsonlWatchers.delete(sessionId);
     }
+  }
+
+  private debouncedJsonlChange(sessionId: string, jsonlPath: string): void {
+    const entry = this.jsonlWatchers.get(sessionId);
+    if (!entry) { return; }
+    if (entry.debounceTimer) { clearTimeout(entry.debounceTimer); }
+    entry.debounceTimer = setTimeout(() => {
+      this.handleJsonlChange(sessionId, jsonlPath);
+    }, 50);
   }
 
   private handleJsonlChange(sessionId: string, jsonlPath: string): void {
     const entry = this.jsonlWatchers.get(sessionId);
     if (!entry) { return; }
 
-    if (entry.idleTimer) { clearTimeout(entry.idleTimer); }
+    this.processNewLines(sessionId, jsonlPath, entry);
 
-    this.checkJsonlAppend(sessionId, jsonlPath, entry);
-
-    const lastType = this.getLastEntryType(jsonlPath);
-    if (lastType === 'assistant') {
-      this._onSessionIdle.fire(sessionId);
-    } else {
-      this._onSessionActivity.fire(sessionId);
-      entry.idleTimer = setTimeout(() => {
-        const currentLastType = this.getLastEntryType(jsonlPath);
-        if (currentLastType === 'assistant') {
-          this._onSessionIdle.fire(sessionId);
-        }
-      }, STATUS_IDLE_MS);
+    const status = this.inferStatusFromTail(jsonlPath);
+    if (status) {
+      this._onSessionStatusChanged.fire({ sessionId, status });
     }
   }
 
-  private checkJsonlAppend(sessionId: string, jsonlPath: string, entry: { offset: number }): void {
+  private processNewLines(sessionId: string, jsonlPath: string, entry: { offset: number }): void {
     try {
       const stats = fs.statSync(jsonlPath);
       if (stats.size <= entry.offset) { return; }
@@ -125,14 +126,10 @@ export class SessionWatcher implements vscode.Disposable {
     } catch { /* file may be locked */ }
   }
 
-  private getLastEntryType(jsonlPath: string): string | null {
+  inferStatusFromTail(jsonlPath: string): SessionStatus | null {
     try {
       const fd = fs.openSync(jsonlPath, 'r');
       const stats = fs.fstatSync(fd);
-      // Assistant messages can be very large (50KB+). Read enough from the
-      // end to find the last complete JSON line's "type" field.
-      // We don't need to parse the whole line — just find "type":"..." near
-      // the end of the last line.
       const readSize = Math.min(stats.size, 256 * 1024);
       const buf = Buffer.alloc(readSize);
       fs.readSync(fd, buf, 0, readSize, stats.size - readSize);
@@ -141,16 +138,27 @@ export class SessionWatcher implements vscode.Disposable {
       const text = buf.toString('utf-8');
       const lines = text.split('\n').filter(l => l.trim());
       for (let i = lines.length - 1; i >= 0; i--) {
-        // The top-level "type" is always near the start of each JSONL line.
-        // Extract it from the first 500 chars to avoid matching nested types
-        // like "type":"text" or "type":"tool_use" inside message content.
-        const head = lines[i].substring(0, 500);
-        const match = head.match(/"type"\s*:\s*"([^"]+)"/);
-        if (match) {
-          const t = match[1];
-          if (['assistant', 'user', 'system', 'custom-title', 'agent-name', 'permission-mode'].includes(t)) {
-            return t;
+        const head = lines[i].substring(0, 1000);
+        const typeMatch = head.match(/"type"\s*:\s*"([^"]+)"/);
+        if (!typeMatch) { continue; }
+        const entryType = typeMatch[1];
+
+        if (entryType === 'assistant') {
+          const stopMatch = head.match(/"stop_reason"\s*:\s*"([^"]+)"/);
+          if (stopMatch) {
+            if (stopMatch[1] === 'tool_use') { return sessionStatus('active', 'tool_use'); }
+            if (stopMatch[1] === 'end_turn') { return sessionStatus('idle', 'ready'); }
           }
+          return sessionStatus('idle', 'ready');
+        }
+
+        if (entryType === 'user') {
+          return sessionStatus('active', 'responding');
+        }
+
+        // skip metadata types (system, custom-title, agent-name, permission-mode) and keep looking
+        if (['system', 'custom-title', 'agent-name', 'permission-mode'].includes(entryType)) {
+          continue;
         }
       }
     } catch { /* file locked or missing */ }
@@ -211,14 +219,13 @@ export class SessionWatcher implements vscode.Disposable {
     this.dirWatcher?.close();
     for (const [, entry] of this.jsonlWatchers) {
       entry.watcher.close();
-      if (entry.idleTimer) { clearTimeout(entry.idleTimer); }
+      if (entry.debounceTimer) { clearTimeout(entry.debounceTimer); }
     }
     this.jsonlWatchers.clear();
     this._onSessionStarted.dispose();
     this._onSessionEnded.dispose();
     this._onSessionRenamed.dispose();
-    this._onSessionActivity.dispose();
-    this._onSessionIdle.dispose();
+    this._onSessionStatusChanged.dispose();
     this._onSessionTokenUpdate.dispose();
   }
 }

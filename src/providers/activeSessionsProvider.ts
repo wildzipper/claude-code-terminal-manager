@@ -1,8 +1,22 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { ActiveSession } from '../types';
+import { ActiveSession, SessionStatus } from '../types';
 import { TerminalTracker } from '../services/terminalTracker';
 import { formatTokenCount } from '../utils/format';
+
+function statusIcon(status: SessionStatus): vscode.ThemeIcon {
+  switch (status.category) {
+    case 'idle':
+      return new vscode.ThemeIcon('circle-filled', new vscode.ThemeColor('testing.iconPassed'));
+    case 'active':
+      if (status.detail === 'tool_use') {
+        return new vscode.ThemeIcon('tools~spin', new vscode.ThemeColor('charts.orange'));
+      }
+      return new vscode.ThemeIcon('sync~spin', new vscode.ThemeColor('charts.yellow'));
+    case 'unknown':
+      return new vscode.ThemeIcon('circle-outline');
+  }
+}
 
 const CONTEXT_LIMIT = 200_000;
 
@@ -17,9 +31,10 @@ export class ActiveSessionTreeItem extends vscode.TreeItem {
     this.description = `${folder}${contextStr}`;
 
     const tu = session.tokenUsage;
+    const statusLabel = `${session.status.category}:${session.status.detail}`;
     this.tooltip = new vscode.MarkdownString(
       `**${session.displayName}**\n\n` +
-      `- Status: ${session.status}\n` +
+      `- Status: ${statusLabel}\n` +
       `- Folder: ${session.cwd}\n` +
       `- Session: \`${session.sessionId}\`\n` +
       `- PID: ${session.pid}\n` +
@@ -30,11 +45,7 @@ export class ActiveSessionTreeItem extends vscode.TreeItem {
       `- Cache create: ${formatTokenCount(tu.cacheCreateTokens)}\n` +
       `- Total output: ${formatTokenCount(tu.cumulativeOutput)}`
     );
-    this.iconPath = session.status === 'ready'
-      ? new vscode.ThemeIcon('circle-filled', new vscode.ThemeColor('testing.iconPassed'))
-      : session.status === 'working'
-        ? new vscode.ThemeIcon('sync~spin', new vscode.ThemeColor('charts.yellow'))
-        : new vscode.ThemeIcon('circle-outline');
+    this.iconPath = statusIcon(session.status);
     this.contextValue = 'activeSession';
     this.command = {
       command: 'claudeTerminalManager.focusSession',
