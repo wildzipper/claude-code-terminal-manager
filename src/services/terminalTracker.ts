@@ -3,8 +3,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as cp from 'child_process';
-import { ActiveSession, SessionPidFile, TokenUsage } from '../types';
-import { SessionWatcher, TokenUpdateEvent } from './sessionWatcher';
+import { ActiveSession, SessionPidFile, SessionStatus, sessionStatus, TokenUsage } from '../types';
+import { SessionWatcher, StatusChangeEvent, TokenUpdateEvent } from './sessionWatcher';
 import { SessionStorage } from './sessionStorage';
 
 const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
@@ -33,8 +33,7 @@ export class TerminalTracker implements vscode.Disposable {
       this.sessionWatcher.onSessionStarted(pf => this.handleSessionStarted(pf)),
       this.sessionWatcher.onSessionEnded(pid => this.handleSessionEnded(pid)),
       this.sessionWatcher.onSessionRenamed(e => this.handleSessionRenamed(e)),
-      this.sessionWatcher.onSessionActivity(id => this.updateStatus(id, 'working')),
-      this.sessionWatcher.onSessionIdle(id => this.updateStatus(id, 'ready')),
+      this.sessionWatcher.onSessionStatusChanged(e => this.handleStatusChanged(e)),
       this.sessionWatcher.onSessionTokenUpdate(e => this.handleTokenUpdate(e)),
     );
 
@@ -47,14 +46,6 @@ export class TerminalTracker implements vscode.Disposable {
 
   getSessionBySessionId(sessionId: string): ActiveSession | undefined {
     return this.sessions.get(sessionId);
-  }
-
-  updateStatus(sessionId: string, status: 'ready' | 'working' | 'unknown'): void {
-    const session = this.sessions.get(sessionId);
-    if (session && session.status !== status) {
-      session.status = status;
-      this._onSessionsChanged.fire();
-    }
   }
 
   getSessionForTerminal(terminal: vscode.Terminal): ActiveSession | undefined {
@@ -79,7 +70,14 @@ export class TerminalTracker implements vscode.Disposable {
     if (!terminal) { return; }
 
     const jsonlPath = this.findJsonlPath(pidFile);
-    const displayName = await this.resolveSessionName(pidFile, jsonlPath);
+    let displayName = await this.resolveSessionName(pidFile, jsonlPath);
+
+    if (displayName === pidFile.sessionId.substring(0, 8)) {
+      const termName = terminal.name;
+      if (termName.startsWith('Claude: ')) {
+        displayName = termName.substring(8);
+      }
+    }
 
     let tokenUsage: TokenUsage = { contextTokens: 0, cumulativeOutput: 0, cacheReadTokens: 0, cacheCreateTokens: 0 };
     if (jsonlPath) {
@@ -87,12 +85,18 @@ export class TerminalTracker implements vscode.Disposable {
       tokenUsage = await this.sessionStorage.scanTokenUsage(jsonlPath);
     }
 
+    let initialStatus: SessionStatus = sessionStatus('unknown', 'initializing');
+    if (jsonlPath) {
+      const inferred = this.sessionWatcher.inferStatusFromTail(jsonlPath);
+      if (inferred) { initialStatus = inferred; }
+    }
+
     this.sessions.set(pidFile.sessionId, {
       sessionId: pidFile.sessionId,
       terminal,
       cwd: pidFile.cwd,
       displayName,
-      status: 'ready',
+      status: initialStatus,
       pid: pidFile.pid,
       startedAt: pidFile.startedAt,
       version: pidFile.version,
@@ -101,9 +105,9 @@ export class TerminalTracker implements vscode.Disposable {
     });
     this._onSessionsChanged.fire();
 
-    // If name is still UUID-like, retry after JSONL has time to populate
     if (displayName === pidFile.sessionId.substring(0, 8)) {
       setTimeout(() => this.refreshSessionName(pidFile.sessionId), 3000);
+      setTimeout(() => this.refreshSessionName(pidFile.sessionId), 8000);
     }
   }
 
@@ -136,6 +140,14 @@ export class TerminalTracker implements vscode.Disposable {
       session.displayName = event.newName;
       this._onSessionsChanged.fire();
     }
+  }
+
+  private handleStatusChanged(event: StatusChangeEvent): void {
+    const session = this.sessions.get(event.sessionId);
+    if (!session) { return; }
+    if (session.status.category === event.status.category && session.status.detail === event.status.detail) { return; }
+    session.status = event.status;
+    this._onSessionsChanged.fire();
   }
 
   private handleTokenUpdate(event: TokenUpdateEvent): void {
@@ -199,14 +211,12 @@ export class TerminalTracker implements vscode.Disposable {
   }
 
   private async resolveSessionName(pidFile: SessionPidFile, jsonlPath?: string): Promise<string> {
-    // Coalesce: customTitle > agentName > slug > pidFile.name > UUID
     if (jsonlPath) {
       try {
         const name = await this.sessionStorage.resolveDisplayName(jsonlPath, '');
         if (name && name !== '(unnamed)') { return name; }
       } catch { /* fall through */ }
     }
-    // PID file name is always available instantly — reliable fallback
     if (pidFile.name) { return pidFile.name; }
     return pidFile.sessionId.substring(0, 8);
   }
@@ -232,6 +242,11 @@ export class TerminalTracker implements vscode.Disposable {
   private findJsonlPath(pidFile: SessionPidFile): string | undefined {
     const found = this.sessionStorage.findJsonlForSession(pidFile.sessionId);
     if (found) { return found; }
+
+    if (pidFile.bridgeSessionId) {
+      const bridged = this.sessionStorage.findJsonlForSession(pidFile.bridgeSessionId);
+      if (bridged) { return bridged; }
+    }
 
     const cwdNormalized = pidFile.cwd.replace(/\//g, '\\');
     const encoded = cwdNormalized

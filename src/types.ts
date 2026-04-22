@@ -7,12 +7,26 @@ export interface TokenUsage {
   cacheCreateTokens: number;
 }
 
+export type SessionStatusCategory = 'idle' | 'active' | 'unknown';
+
+export type SessionStatus =
+  | { category: 'idle'; detail: 'ready' | 'waiting_for_input' }
+  | { category: 'active'; detail: 'responding' | 'tool_use' | 'writing' }
+  | { category: 'unknown'; detail: 'initializing' | 'stale' };
+
+export function sessionStatus(category: 'idle', detail: 'ready' | 'waiting_for_input'): SessionStatus;
+export function sessionStatus(category: 'active', detail: 'responding' | 'tool_use' | 'writing'): SessionStatus;
+export function sessionStatus(category: 'unknown', detail: 'initializing' | 'stale'): SessionStatus;
+export function sessionStatus(category: SessionStatusCategory, detail: string): SessionStatus {
+  return { category, detail } as SessionStatus;
+}
+
 export interface ActiveSession {
   sessionId: string;
   terminal: vscode.Terminal;
   cwd: string;
   displayName: string;
-  status: 'ready' | 'working' | 'unknown';
+  status: SessionStatus;
   pid: number;
   startedAt: number;
   version: string;
