@@ -2,14 +2,17 @@ import * as vscode from 'vscode';
 import { SessionStorage } from './services/sessionStorage';
 import { SessionWatcher } from './services/sessionWatcher';
 import { TerminalTracker } from './services/terminalTracker';
+import { Logger } from './services/logger';
 import { ActiveSessionsProvider } from './providers/activeSessionsProvider';
 import { PreviousSessionsProvider } from './providers/previousSessionsProvider';
 import { PreviousSession } from './types';
 
 export function activate(context: vscode.ExtensionContext): void {
+  const logger = new Logger();
+  logger.log('extension', 'activating');
   const sessionStorage = new SessionStorage();
-  const sessionWatcher = new SessionWatcher();
-  const terminalTracker = new TerminalTracker(sessionWatcher, sessionStorage);
+  const sessionWatcher = new SessionWatcher(logger);
+  const terminalTracker = new TerminalTracker(sessionWatcher, sessionStorage, logger);
 
   const activeProvider = new ActiveSessionsProvider(terminalTracker);
   const previousProvider = new PreviousSessionsProvider(sessionStorage);
@@ -54,6 +57,10 @@ export function activate(context: vscode.ExtensionContext): void {
       previousProvider.refresh();
     }),
 
+    vscode.commands.registerCommand('claudeTerminalManager.showLogs', () => {
+      logger.show();
+    }),
+
     vscode.commands.registerCommand('claudeTerminalManager.copySessionId', (item: { session?: { sessionId: string } }) => {
       const sessionId = item?.session?.sessionId;
       if (sessionId) {
@@ -73,6 +80,7 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     sessionWatcher,
     terminalTracker,
+    logger,
     { dispose: () => clearInterval(refreshInterval) },
   );
 }
