@@ -49,6 +49,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
 
     vscode.commands.registerCommand('claudeTerminalManager.refresh', () => {
+      terminalTracker.refreshAllNames();
       activeProvider.refresh();
       previousProvider.refresh();
     }),

@@ -7,18 +7,18 @@ export interface TokenUsage {
   cacheCreateTokens: number;
 }
 
-export type SessionStatusCategory = 'idle' | 'active' | 'unknown';
+export interface SessionStatus {
+  type: string;
+  qualifier: string | null;
+  isError?: boolean;
+}
 
-export type SessionStatus =
-  | { category: 'idle'; detail: 'ready' | 'waiting_for_input' }
-  | { category: 'active'; detail: 'responding' | 'tool_use' | 'writing' }
-  | { category: 'unknown'; detail: 'initializing' | 'stale' };
+export function sessionStatus(type: string, qualifier: string | null, isError?: boolean): SessionStatus {
+  return isError ? { type, qualifier, isError } : { type, qualifier };
+}
 
-export function sessionStatus(category: 'idle', detail: 'ready' | 'waiting_for_input'): SessionStatus;
-export function sessionStatus(category: 'active', detail: 'responding' | 'tool_use' | 'writing'): SessionStatus;
-export function sessionStatus(category: 'unknown', detail: 'initializing' | 'stale'): SessionStatus;
-export function sessionStatus(category: SessionStatusCategory, detail: string): SessionStatus {
-  return { category, detail } as SessionStatus;
+export function statusEquals(a: SessionStatus, b: SessionStatus): boolean {
+  return a.type === b.type && a.qualifier === b.qualifier && !!a.isError === !!b.isError;
 }
 
 export interface ActiveSession {

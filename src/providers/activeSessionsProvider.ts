@@ -5,15 +5,29 @@ import { TerminalTracker } from '../services/terminalTracker';
 import { formatTokenCount } from '../utils/format';
 
 function statusIcon(status: SessionStatus): vscode.ThemeIcon {
-  switch (status.category) {
-    case 'idle':
-      return new vscode.ThemeIcon('circle-filled', new vscode.ThemeColor('testing.iconPassed'));
-    case 'active':
-      if (status.detail === 'tool_use') {
-        return new vscode.ThemeIcon('tools~spin', new vscode.ThemeColor('charts.orange'));
+  if (status.isError) {
+    return new vscode.ThemeIcon('error', new vscode.ThemeColor('testing.iconFailed'));
+  }
+
+  switch (status.type) {
+    case 'assistant':
+      switch (status.qualifier) {
+        case 'tool_use':
+          return new vscode.ThemeIcon('tools~spin', new vscode.ThemeColor('charts.orange'));
+        case 'end_turn':
+        case 'stop_sequence':
+          return new vscode.ThemeIcon('circle-filled', new vscode.ThemeColor('testing.iconPassed'));
+        default:
+          return new vscode.ThemeIcon('sync~spin', new vscode.ThemeColor('charts.yellow'));
       }
+    case 'user':
       return new vscode.ThemeIcon('sync~spin', new vscode.ThemeColor('charts.yellow'));
-    case 'unknown':
+    case 'system':
+      if (status.qualifier === 'api_error') {
+        return new vscode.ThemeIcon('warning', new vscode.ThemeColor('testing.iconFailed'));
+      }
+      return new vscode.ThemeIcon('circle-outline');
+    default:
       return new vscode.ThemeIcon('circle-outline');
   }
 }
@@ -31,7 +45,11 @@ export class ActiveSessionTreeItem extends vscode.TreeItem {
     this.description = `${folder}${contextStr}`;
 
     const tu = session.tokenUsage;
-    const statusLabel = `${session.status.category}:${session.status.detail}`;
+    const statusLabel = session.status.isError
+      ? `${session.status.type}:error`
+      : session.status.qualifier
+        ? `${session.status.type}:${session.status.qualifier}`
+        : session.status.type;
     this.tooltip = new vscode.MarkdownString(
       `**${session.displayName}**\n\n` +
       `- Status: ${statusLabel}\n` +
