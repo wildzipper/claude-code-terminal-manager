@@ -6,6 +6,7 @@ import * as cp from 'child_process';
 import { ActiveSession, SessionPidFile, SessionStatus, sessionStatus, statusEquals, TokenUsage } from '../types';
 import { SessionWatcher, StatusChangeEvent, TokenUpdateEvent } from './sessionWatcher';
 import { SessionStorage } from './sessionStorage';
+import { Logger } from './logger';
 
 const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 
@@ -21,6 +22,7 @@ export class TerminalTracker implements vscode.Disposable {
   constructor(
     private sessionWatcher: SessionWatcher,
     private sessionStorage: SessionStorage,
+    private logger: Logger,
   ) {}
 
   start(): void {
@@ -68,11 +70,16 @@ export class TerminalTracker implements vscode.Disposable {
 
   private async handleSessionStarted(pidFile: SessionPidFile): Promise<void> {
     if (this.sessions.has(pidFile.sessionId)) { return; }
+    this.logger.log('session', 'started', { sessionId: pidFile.sessionId, pid: pidFile.pid });
 
     const terminal = await this.findTerminalForClaudePid(pidFile.pid);
-    if (!terminal) { return; }
+    if (!terminal) {
+      this.logger.log('session', 'no terminal match', { sessionId: pidFile.sessionId, pid: pidFile.pid });
+      return;
+    }
 
     const jsonlPath = this.findJsonlPath(pidFile);
+    this.logger.log('session', 'jsonl resolved', { sessionId: pidFile.sessionId, jsonlPath: jsonlPath || 'NONE' });
     let displayName = await this.resolveSessionName(pidFile, jsonlPath);
 
     if (displayName === pidFile.sessionId.substring(0, 8)) {
@@ -140,8 +147,11 @@ export class TerminalTracker implements vscode.Disposable {
   private handleSessionRenamed(event: { sessionId: string; newName: string }): void {
     const session = this.sessions.get(event.sessionId);
     if (session) {
+      this.logger.log('rename', 'applied', { sessionId: event.sessionId, from: session.displayName, to: event.newName });
       session.displayName = event.newName;
       this._onSessionsChanged.fire();
+    } else {
+      this.logger.log('rename', 'no session for id', { sessionId: event.sessionId });
     }
   }
 
@@ -226,7 +236,10 @@ export class TerminalTracker implements vscode.Disposable {
 
   refreshSessionName(sessionId: string): void {
     const session = this.sessions.get(sessionId);
-    if (!session) { return; }
+    if (!session) {
+      this.logger.log('refresh', 'no session', { sessionId });
+      return;
+    }
     const jsonlPath = session.jsonlPath || this.sessionStorage.findJsonlForSession(sessionId);
     if (jsonlPath && !session.jsonlPath) {
       session.jsonlPath = jsonlPath;
@@ -234,11 +247,14 @@ export class TerminalTracker implements vscode.Disposable {
     }
     if (jsonlPath) {
       this.sessionStorage.resolveDisplayName(jsonlPath, '').then(name => {
+        this.logger.log('refresh', 'name resolved', { sessionId, current: session.displayName, resolved: name });
         if (name && name !== '(unnamed)' && name !== session.displayName) {
           session.displayName = name;
           this._onSessionsChanged.fire();
         }
       });
+    } else {
+      this.logger.log('refresh', 'no jsonl path', { sessionId });
     }
   }
 
@@ -271,21 +287,71 @@ export class TerminalTracker implements vscode.Disposable {
         if (fs.statSync(jsonlPath).isFile()) { return jsonlPath; }
       } catch { continue; }
     }
+
+    // Resumed session fallback: PID's sessionId differs from JSONL filename.
+    // Pick the JSONL in the cwd-matching project dir with the latest mtime >= startedAt.
+    for (const candidate of candidates) {
+      const projDir = path.join(PROJECTS_DIR, candidate);
+      let entries: string[];
+      try {
+        entries = fs.readdirSync(projDir).filter(f => f.endsWith('.jsonl'));
+      } catch { continue; }
+
+      let best: { path: string; mtime: number } | null = null;
+      for (const f of entries) {
+        const fp = path.join(projDir, f);
+        try {
+          const st = fs.statSync(fp);
+          if (st.mtimeMs < pidFile.startedAt - 60_000) { continue; }
+          if (!best || st.mtimeMs > best.mtime) { best = { path: fp, mtime: st.mtimeMs }; }
+        } catch { continue; }
+      }
+      if (best) { return best.path; }
+    }
     return undefined;
   }
 
   private pollSessionStatuses(): void {
-    for (const [, session] of this.sessions) {
-      if (!session.jsonlPath) { continue; }
+    const total = this.sessions.size;
+    let withPath = 0;
+    let changed = 0;
+    let resolved = 0;
+    for (const [sessionId, session] of this.sessions) {
+      if (!session.jsonlPath) {
+        const pidFile: SessionPidFile = {
+          pid: session.pid,
+          sessionId: session.sessionId,
+          cwd: session.cwd,
+          startedAt: session.startedAt,
+          version: session.version,
+          kind: 'interactive',
+          entrypoint: 'cli',
+        };
+        const found = this.findJsonlPath(pidFile);
+        if (found) {
+          this.logger.log('poll', 'jsonl resolved late', { sessionId, jsonlPath: found });
+          session.jsonlPath = found;
+          this.sessionWatcher.watchJsonlFile(sessionId, found);
+          resolved++;
+          this.refreshSessionName(sessionId);
+        } else {
+          continue;
+        }
+      }
+      withPath++;
       const status = this.sessionWatcher.inferStatusFromTail(session.jsonlPath);
       if (!status) { continue; }
       if (statusEquals(session.status, status)) { continue; }
+      this.logger.log('poll', 'status changed', { sessionId, from: session.status, to: status });
       session.status = status;
+      changed++;
       this._onSessionsChanged.fire();
     }
+    this.logger.log('poll', 'cycle', { total, withPath, changed, resolved });
   }
 
   refreshAllNames(): void {
+    this.logger.log('refresh', 'refreshAllNames called', { count: this.sessions.size });
     for (const [sessionId] of this.sessions) {
       this.refreshSessionName(sessionId);
     }

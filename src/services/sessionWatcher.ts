@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as os from 'os';
 import * as vscode from 'vscode';
 import { SessionPidFile, SessionStatus, sessionStatus, TokenUsage } from '../types';
+import { Logger } from './logger';
 
 const STATUS_RELEVANT_TYPES = new Set(['assistant', 'user', 'system']);
 const SKIP_SYSTEM_SUBTYPES = new Set([
@@ -40,6 +41,8 @@ export class SessionWatcher implements vscode.Disposable {
   private knownPids = new Set<number>();
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
+  constructor(private logger: Logger) {}
+
   start(): void {
     this.scanExistingPidFiles();
     try {
@@ -52,7 +55,10 @@ export class SessionWatcher implements vscode.Disposable {
   }
 
   watchJsonlFile(sessionId: string, jsonlPath: string): void {
-    if (this.jsonlWatchers.has(sessionId)) { return; }
+    if (this.jsonlWatchers.has(sessionId)) {
+      this.logger.log('watcher', 'already watching', { sessionId });
+      return;
+    }
     try {
       const stats = fs.statSync(jsonlPath);
       const offset = stats.size;
@@ -60,7 +66,10 @@ export class SessionWatcher implements vscode.Disposable {
         this.debouncedJsonlChange(sessionId, jsonlPath);
       });
       this.jsonlWatchers.set(sessionId, { watcher, offset, debounceTimer: null });
-    } catch { /* file may not exist yet */ }
+      this.logger.log('watcher', 'started', { sessionId, jsonlPath, offset });
+    } catch (err) {
+      this.logger.log('watcher', 'start failed', { sessionId, jsonlPath, err: String(err) });
+    }
   }
 
   unwatchJsonlFile(sessionId: string): void {
@@ -85,11 +94,15 @@ export class SessionWatcher implements vscode.Disposable {
     const entry = this.jsonlWatchers.get(sessionId);
     if (!entry) { return; }
 
+    this.logger.log('watcher', 'fs.watch fired', { sessionId });
     this.processNewLines(sessionId, jsonlPath, entry);
 
     const status = this.inferStatusFromTail(jsonlPath);
     if (status) {
+      this.logger.log('watcher', 'status inferred', { sessionId, status });
       this._onSessionStatusChanged.fire({ sessionId, status });
+    } else {
+      this.logger.log('watcher', 'status returned null', { sessionId });
     }
   }
 
@@ -111,8 +124,10 @@ export class SessionWatcher implements vscode.Disposable {
         try {
           const obj = JSON.parse(line);
           if (obj.type === 'custom-title' && obj.customTitle) {
+            this.logger.log('rename', 'custom-title detected', { sessionId, newName: obj.customTitle });
             this._onSessionRenamed.fire({ sessionId, newName: obj.customTitle });
           } else if (obj.type === 'agent-name' && obj.agentName) {
+            this.logger.log('rename', 'agent-name detected', { sessionId, newName: obj.agentName });
             this._onSessionRenamed.fire({ sessionId, newName: obj.agentName });
           }
 
