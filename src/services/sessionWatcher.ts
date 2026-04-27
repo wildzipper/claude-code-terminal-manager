@@ -4,6 +4,12 @@ import * as os from 'os';
 import * as vscode from 'vscode';
 import { SessionPidFile, SessionStatus, sessionStatus, TokenUsage } from '../types';
 
+const STATUS_RELEVANT_TYPES = new Set(['assistant', 'user', 'system']);
+const SKIP_SYSTEM_SUBTYPES = new Set([
+  'turn_duration', 'bridge_status', 'local_command', 'compact_boundary',
+  'informational', 'away_summary', 'scheduled_task_fire',
+]);
+
 const SESSIONS_DIR = path.join(os.homedir(), '.claude', 'sessions');
 
 export interface TokenUpdateEvent {
@@ -30,7 +36,7 @@ export class SessionWatcher implements vscode.Disposable {
   readonly onSessionTokenUpdate = this._onSessionTokenUpdate.event;
 
   private dirWatcher: fs.FSWatcher | null = null;
-  private jsonlWatchers = new Map<string, { watcher: fs.FSWatcher; offset: number; debounceTimer: ReturnType<typeof setTimeout> | null; recheckTimer: ReturnType<typeof setTimeout> | null }>();
+  private jsonlWatchers = new Map<string, { watcher: fs.FSWatcher; offset: number; debounceTimer: ReturnType<typeof setTimeout> | null }>();
   private knownPids = new Set<number>();
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -53,7 +59,7 @@ export class SessionWatcher implements vscode.Disposable {
       const watcher = fs.watch(jsonlPath, () => {
         this.debouncedJsonlChange(sessionId, jsonlPath);
       });
-      this.jsonlWatchers.set(sessionId, { watcher, offset, debounceTimer: null, recheckTimer: null });
+      this.jsonlWatchers.set(sessionId, { watcher, offset, debounceTimer: null });
     } catch { /* file may not exist yet */ }
   }
 
@@ -62,7 +68,6 @@ export class SessionWatcher implements vscode.Disposable {
     if (entry) {
       entry.watcher.close();
       if (entry.debounceTimer) { clearTimeout(entry.debounceTimer); }
-      if (entry.recheckTimer) { clearTimeout(entry.recheckTimer); }
       this.jsonlWatchers.delete(sessionId);
     }
   }
@@ -80,28 +85,18 @@ export class SessionWatcher implements vscode.Disposable {
     const entry = this.jsonlWatchers.get(sessionId);
     if (!entry) { return; }
 
-    if (entry.recheckTimer) { clearTimeout(entry.recheckTimer); }
-
     this.processNewLines(sessionId, jsonlPath, entry);
 
     const status = this.inferStatusFromTail(jsonlPath);
     if (status) {
       this._onSessionStatusChanged.fire({ sessionId, status });
-
-      if (status.category === 'active') {
-        entry.recheckTimer = setTimeout(() => {
-          const updated = this.inferStatusFromTail(jsonlPath);
-          if (updated) {
-            this._onSessionStatusChanged.fire({ sessionId, status: updated });
-          }
-        }, 3000);
-      }
     }
   }
 
   private processNewLines(sessionId: string, jsonlPath: string, entry: { offset: number }): void {
     try {
       const stats = fs.statSync(jsonlPath);
+      if (stats.size < entry.offset) { entry.offset = 0; }
       if (stats.size <= entry.offset) { return; }
 
       const fd = fs.openSync(jsonlPath, 'r');
@@ -155,22 +150,26 @@ export class SessionWatcher implements vscode.Disposable {
         if (!typeMatch) { continue; }
         const entryType = typeMatch[1];
 
+        if (!STATUS_RELEVANT_TYPES.has(entryType)) { continue; }
+
         if (entryType === 'assistant') {
+          const isError = /"isApiErrorMessage"\s*:\s*true/.test(head);
           const stopMatch = head.match(/"stop_reason"\s*:\s*"([^"]+)"/);
-          if (stopMatch) {
-            if (stopMatch[1] === 'tool_use') { return sessionStatus('active', 'tool_use'); }
-            if (stopMatch[1] === 'end_turn') { return sessionStatus('idle', 'ready'); }
-          }
-          return sessionStatus('idle', 'ready');
+          const qualifier = stopMatch ? stopMatch[1] : null;
+          return sessionStatus('assistant', qualifier, isError || undefined);
         }
 
         if (entryType === 'user') {
-          return sessionStatus('active', 'responding');
+          const isMeta = /"isMeta"\s*:\s*true/.test(head);
+          if (isMeta) { continue; }
+          return sessionStatus('user', null);
         }
 
-        // skip metadata types (system, custom-title, agent-name, permission-mode) and keep looking
-        if (['system', 'custom-title', 'agent-name', 'permission-mode'].includes(entryType)) {
-          continue;
+        if (entryType === 'system') {
+          const subtypeMatch = head.match(/"subtype"\s*:\s*"([^"]+)"/);
+          const subtype = subtypeMatch ? subtypeMatch[1] : null;
+          if (subtype && SKIP_SYSTEM_SUBTYPES.has(subtype)) { continue; }
+          return sessionStatus('system', subtype);
         }
       }
     } catch { /* file locked or missing */ }
@@ -232,7 +231,6 @@ export class SessionWatcher implements vscode.Disposable {
     for (const [, entry] of this.jsonlWatchers) {
       entry.watcher.close();
       if (entry.debounceTimer) { clearTimeout(entry.debounceTimer); }
-      if (entry.recheckTimer) { clearTimeout(entry.recheckTimer); }
     }
     this.jsonlWatchers.clear();
     this._onSessionStarted.dispose();

@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as cp from 'child_process';
-import { ActiveSession, SessionPidFile, SessionStatus, sessionStatus, TokenUsage } from '../types';
+import { ActiveSession, SessionPidFile, SessionStatus, sessionStatus, statusEquals, TokenUsage } from '../types';
 import { SessionWatcher, StatusChangeEvent, TokenUpdateEvent } from './sessionWatcher';
 import { SessionStorage } from './sessionStorage';
 
@@ -16,6 +16,7 @@ export class TerminalTracker implements vscode.Disposable {
   private sessions = new Map<string, ActiveSession>();
   private terminalPids = new Map<vscode.Terminal, number>();
   private disposables: vscode.Disposable[] = [];
+  private statusPollTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     private sessionWatcher: SessionWatcher,
@@ -38,6 +39,8 @@ export class TerminalTracker implements vscode.Disposable {
     );
 
     setTimeout(() => this.matchExistingSessions(), 1000);
+
+    this.statusPollTimer = setInterval(() => this.pollSessionStatuses(), 5000);
   }
 
   getActiveSessions(): ActiveSession[] {
@@ -85,7 +88,7 @@ export class TerminalTracker implements vscode.Disposable {
       tokenUsage = await this.sessionStorage.scanTokenUsage(jsonlPath);
     }
 
-    let initialStatus: SessionStatus = sessionStatus('unknown', 'initializing');
+    let initialStatus: SessionStatus = sessionStatus('none', null);
     if (jsonlPath) {
       const inferred = this.sessionWatcher.inferStatusFromTail(jsonlPath);
       if (inferred) { initialStatus = inferred; }
@@ -145,7 +148,7 @@ export class TerminalTracker implements vscode.Disposable {
   private handleStatusChanged(event: StatusChangeEvent): void {
     const session = this.sessions.get(event.sessionId);
     if (!session) { return; }
-    if (session.status.category === event.status.category && session.status.detail === event.status.detail) { return; }
+    if (statusEquals(session.status, event.status)) { return; }
     session.status = event.status;
     this._onSessionsChanged.fire();
   }
@@ -271,7 +274,25 @@ export class TerminalTracker implements vscode.Disposable {
     return undefined;
   }
 
+  private pollSessionStatuses(): void {
+    for (const [, session] of this.sessions) {
+      if (!session.jsonlPath) { continue; }
+      const status = this.sessionWatcher.inferStatusFromTail(session.jsonlPath);
+      if (!status) { continue; }
+      if (statusEquals(session.status, status)) { continue; }
+      session.status = status;
+      this._onSessionsChanged.fire();
+    }
+  }
+
+  refreshAllNames(): void {
+    for (const [sessionId] of this.sessions) {
+      this.refreshSessionName(sessionId);
+    }
+  }
+
   dispose(): void {
+    if (this.statusPollTimer) { clearInterval(this.statusPollTimer); }
     this.disposables.forEach(d => d.dispose());
     this.sessions.clear();
     this.terminalPids.clear();
